@@ -26,6 +26,18 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="README.md">English</a>
+  &nbsp;·&nbsp;
+  <a href="README_ZH.md">简体中文</a>
+  &nbsp;·&nbsp;
+  <a href="README_TW.md">繁體中文</a>
+  &nbsp;·&nbsp;
+  <a href="README_JP.md">日本語</a>
+  &nbsp;·&nbsp;
+  <a href="README_KO.md">한국어</a>
+</p>
+
 ---
 
 ## About The Project
@@ -46,6 +58,69 @@ Built with performance in mind, Deskwarp calculates and renders real-time window
 ## Open Source & Transparency
 
 Security and community trust are fundamental to this project. Deskwarp is distributed completely free of charge, providing unrestricted access to the underlying logic and rendering pipeline. Developers and enthusiasts are encouraged to inspect the repository, review the architecture, compile the software directly from the source, and contribute to future iterations.
+
+## Building From Source
+
+Deskwarp is a single-file C++17 application (Qt 6 + Win32/D3D11). The recommended way to build it on Windows is [MSYS2](https://www.msys2.org/).
+
+### 1. Install the toolchain
+
+Install MSYS2, then open the **MSYS2 UCRT64** shell (not the plain *MSYS* shell) and install the required packages:
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg
+pacman -S mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja
+```
+
+`mingw-w64-ucrt-x86_64-qt6-base` provides Qt 6 Core, Gui, Widgets and Network, while `mingw-w64-ucrt-x86_64-qt6-svg` provides the Qt SVG module.
+
+### 2. Build
+
+```bash
+cd Deskwarp
+./build.sh
+```
+
+`build.sh` configures the project with CMake + Ninja, compiles the sources and copies every UCRT64/Qt DLL that `Deskwarp.exe` depends on next to the executable, so the output folder is directly runnable.
+
+<details>
+<summary>Manual build</summary>
+
+```bash
+cmake -B build -G Ninja
+cmake --build build
+```
+
+</details>
+
+### 3. Run
+
+```bash
+./build/Deskwarp.exe
+```
+
+The executable and its DLLs must stay in the same folder. On first start a `config.cfg` file is created automatically next to the executable.
+
+## Command Line
+
+| Command | Description |
+| :--- | :--- |
+| `Deskwarp.exe help` | Show the help message. |
+| `Deskwarp.exe config <name> <t\|f>` | Turn a config option on (`t`) or off (`f`). |
+
+`config.cfg` lives next to the executable and is created with these defaults:
+
+```
+AwaysRunAsAdmin = false
+StartUp = false
+StartUp.BackgroundRunning = false
+```
+
+| Option | Description |
+| :--- | :--- |
+| `AwaysRunAsAdmin` | `t`: always ask for administrator rights. `f`: never ask, start with normal rights. (default) |
+| `StartUp` | `t`: register the program in Windows startup. `f`: remove the startup entry. (default) |
+| `StartUp.BackgroundRunning` | `t`: the startup entry runs with `--background`. `f`: the startup entry has no arguments. (default) |
 
 <br><br>
 <div align="center">
