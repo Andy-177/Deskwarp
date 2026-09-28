@@ -36,11 +36,13 @@
 #include <QDesktopServices>
 #include <QUrl>
 #include <QFileInfo>
+#include <QFileIconProvider>
 #include <QCoreApplication>
 #include <QDir>
 #include <QStringList>
 #include <QtSvg/QSvgRenderer>
 #include <QSettings>
+#include <QFile>
 #include <QString>
 #include <QVariant>
 #include <QPointer>
@@ -1925,6 +1927,294 @@ namespace {
         widget->move(x, y);
     }
 
+    namespace AppConfig {
+
+        inline const QString kConfigFileName       = QStringLiteral("config.cfg");
+        inline const QString kKeyAlwaysRunAsAdmin  = QStringLiteral("AwaysRunAsAdmin");
+        inline const QString kKeyStartUp           = QStringLiteral("StartUp");
+        inline const QString kKeyStartUpBackground = QStringLiteral("StartUp.BackgroundRunning");
+        inline const QString kRegistryValueName    = QStringLiteral("Deskwarp");
+        inline const QString kRunKeyPath           = QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        inline const QString kRunApprovedKeyPath   = QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run");
+
+        struct Settings {
+            bool always_run_as_admin        = false;
+            bool startup                    = false;
+            bool startup_background_running = false;
+        };
+
+        enum class CliAction {
+            Launch,
+            Help,
+            ConfigStored,
+            Error
+        };
+
+        [[nodiscard]] QString application_executable_path() noexcept {
+            wchar_t buffer[4096] = {};
+            const DWORD length = ::GetModuleFileNameW(nullptr, buffer, ARRAYSIZE(buffer));
+            if (length == 0 || length >= ARRAYSIZE(buffer)) {
+                return QCoreApplication::applicationFilePath();
+            }
+            return QFileInfo(QString::fromWCharArray(buffer, static_cast<int>(length))).absoluteFilePath();
+        }
+
+        [[nodiscard]] QString application_directory() noexcept {
+            return QFileInfo(application_executable_path()).absolutePath();
+        }
+
+        [[nodiscard]] QString config_file_path() noexcept {
+            return QDir(application_directory()).filePath(kConfigFileName);
+        }
+
+        [[nodiscard]] QString bool_text(bool value) noexcept {
+            return value ? QStringLiteral("true") : QStringLiteral("false");
+        }
+
+        [[nodiscard]] bool parse_bool(const QString& raw, bool fallback) noexcept {
+            const QString value = raw.trimmed().toLower();
+            if (value == QLatin1String("true")   || value == QLatin1String("t")   ||
+                value == QLatin1String("1")      || value == QLatin1String("yes") ||
+                value == QLatin1String("on")) {
+                return true;
+            }
+            if (value == QLatin1String("false")  || value == QLatin1String("f")  ||
+                value == QLatin1String("0")      || value == QLatin1String("no") ||
+                value == QLatin1String("off")) {
+                return false;
+            }
+            return fallback;
+        }
+
+        [[nodiscard]] bool is_switch(const QString& raw) noexcept {
+            return raw.trimmed().toLower() == QLatin1String("t");
+        }
+
+        [[nodiscard]] bool is_known_key(const QString& key) noexcept {
+            return key.compare(kKeyAlwaysRunAsAdmin,  Qt::CaseInsensitive) == 0
+                || key.compare(kKeyStartUp,           Qt::CaseInsensitive) == 0
+                || key.compare(kKeyStartUpBackground, Qt::CaseInsensitive) == 0;
+        }
+
+        [[nodiscard]] QString config_text(const Settings& settings) noexcept {
+            return QStringLiteral("AwaysRunAsAdmin = %1\nStartUp = %2\nStartUp.BackgroundRunning = %3\n")
+                .arg(bool_text(settings.always_run_as_admin),
+                     bool_text(settings.startup),
+                     bool_text(settings.startup_background_running));
+        }
+
+        [[nodiscard]] Settings parse_config_text(const QString& text) noexcept {
+            Settings settings;
+            const QStringList lines = text.split(QRegularExpression(QStringLiteral("\r\n|\n|\r")));
+            for (const QString& line : lines) {
+                const QString entry = line.trimmed();
+                if (entry.isEmpty()
+                    || entry.startsWith(QLatin1Char('#'))
+                    || entry.startsWith(QLatin1Char(';'))) {
+                    continue;
+                }
+                const qsizetype separator = entry.indexOf(QLatin1Char('='));
+                if (separator < 0) {
+                    continue;
+                }
+                const QString key   = entry.left(separator).trimmed();
+                const QString value = entry.mid(separator + 1);
+                if (key.compare(kKeyAlwaysRunAsAdmin, Qt::CaseInsensitive) == 0) {
+                    settings.always_run_as_admin = parse_bool(value, false);
+                } else if (key.compare(kKeyStartUpBackground, Qt::CaseInsensitive) == 0) {
+                    settings.startup_background_running = parse_bool(value, false);
+                } else if (key.compare(kKeyStartUp, Qt::CaseInsensitive) == 0) {
+                    settings.startup = parse_bool(value, false);
+                }
+            }
+            return settings;
+        }
+
+        bool write_config_file(const QString& path, const Settings& settings) noexcept {
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                return false;
+            }
+            const QByteArray payload = config_text(settings).toUtf8();
+            const bool written = file.write(payload) == payload.size();
+            file.close();
+            return written;
+        }
+
+        [[nodiscard]] Settings load_settings() noexcept {
+            const QString path = config_file_path();
+            QFile file(path);
+            if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+                const Settings defaults;
+                (void)write_config_file(path, defaults);
+                return defaults;
+            }
+            const QByteArray payload = file.readAll();
+            file.close();
+            return parse_config_text(QString::fromUtf8(payload));
+        }
+
+        [[nodiscard]] bool store_value(const QString& key, bool value) noexcept {
+            Settings settings = load_settings();
+            if (key.compare(kKeyAlwaysRunAsAdmin, Qt::CaseInsensitive) == 0) {
+                settings.always_run_as_admin = value;
+            } else if (key.compare(kKeyStartUpBackground, Qt::CaseInsensitive) == 0) {
+                settings.startup_background_running = value;
+            } else if (key.compare(kKeyStartUp, Qt::CaseInsensitive) == 0) {
+                settings.startup = value;
+            } else {
+                return false;
+            }
+            return write_config_file(config_file_path(), settings);
+        }
+
+        void apply_startup_registration() noexcept {
+            const Settings settings = load_settings();
+            QSettings run_key(kRunKeyPath, QSettings::NativeFormat);
+            QSettings approved_key(kRunApprovedKeyPath, QSettings::NativeFormat);
+            if (settings.startup) {
+                const QString exe_path = QDir::toNativeSeparators(application_executable_path());
+                const QString entry    = settings.startup_background_running
+                    ? QStringLiteral("\"%1\" %2").arg(exe_path, kStartupArg)
+                    : QStringLiteral("\"%1\"").arg(exe_path);
+                if (run_key.value(kRegistryValueName).toString() != entry) {
+                    run_key.setValue(kRegistryValueName, entry);
+                    run_key.sync();
+                }
+                if (approved_key.contains(kRegistryValueName)) {
+                    approved_key.remove(kRegistryValueName);
+                    approved_key.sync();
+                }
+                return;
+            }
+            if (run_key.contains(kRegistryValueName)) {
+                run_key.remove(kRegistryValueName);
+                run_key.sync();
+            }
+            if (approved_key.contains(kRegistryValueName)) {
+                approved_key.remove(kRegistryValueName);
+                approved_key.sync();
+            }
+        }
+
+        [[nodiscard]] QString help_text() noexcept {
+            return QStringLiteral(
+                "Deskwarp - drag windows with a soft body effect\n"
+                "\n"
+                "Usage:\n"
+                "  Deskwarp.exe [command]\n"
+                "\n"
+                "Commands:\n"
+                "  help                       Show this help.\n"
+                "  config <name> <t|f>        Turn a config option on (t) or off (f).\n"
+                "  --background               Start hidden in the tray.\n"
+                "\n"
+                "Config file:\n"
+                "  %1   (created automatically next to the program)\n"
+                "\n"
+                "Config options:\n"
+                "  AwaysRunAsAdmin            t: always ask for administrator rights.\n"
+                "                             f: never ask, start with normal rights. (default)\n"
+                "  StartUp                    t: register the program in Windows startup.\n"
+                "                             f: remove the startup entry. (default)\n"
+                "  StartUp.BackgroundRunning  t: startup entry runs with --background.\n"
+                "                             f: startup entry has no arguments. (default)\n"
+                "\n"
+                "Examples:\n"
+                "  Deskwarp.exe config StartUp t\n"
+                "  Deskwarp.exe config StartUp.BackgroundRunning t\n"
+                "  Deskwarp.exe config AwaysRunAsAdmin f\n"
+            ).arg(config_file_path());
+        }
+
+        void show_output(const QString& text, bool is_error = false) noexcept {
+            if (::GetConsoleWindow() == nullptr) {
+                (void)::AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+            HANDLE handle = ::GetStdHandle(is_error ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+            if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+                DWORD mode = 0;
+                if (::GetConsoleMode(handle, &mode)) {
+                    const std::wstring wide = text.toStdWString();
+                    DWORD written = 0;
+                    if (::WriteConsoleW(handle, wide.c_str(), static_cast<DWORD>(wide.size()), &written, nullptr)) {
+                        return;
+                    }
+                }
+                const QByteArray utf8 = text.toUtf8();
+                DWORD bytes = 0;
+                if (::WriteFile(handle, utf8.constData(), static_cast<DWORD>(utf8.size()), &bytes, nullptr)) {
+                    return;
+                }
+            }
+            const std::wstring wide = text.toStdWString();
+            (void)::MessageBoxW(nullptr,
+                                wide.c_str(),
+                                L"Deskwarp",
+                                (is_error ? MB_ICONERROR : MB_ICONINFORMATION) | MB_OK);
+        }
+
+        [[nodiscard]] QStringList command_line_arguments() noexcept {
+            int count = 0;
+            LPWSTR* const parsed = ::CommandLineToArgvW(::GetCommandLineW(), &count);
+            QStringList args;
+            if (parsed != nullptr) {
+                args.reserve(static_cast<int>(count));
+                for (int i = 0; i < count; ++i) {
+                    args.append(QString::fromWCharArray(parsed[i]));
+                }
+                ::LocalFree(parsed);
+            }
+            if (args.isEmpty()) {
+                args.append(QStringLiteral("Deskwarp"));
+            }
+            return args;
+        }
+
+        [[nodiscard]] CliAction process_command_line(const QStringList& args, QString& output) noexcept {
+            if (args.size() < 2) {
+                return CliAction::Launch;
+            }
+            const QString command = args.at(1).toLower();
+            const bool is_help = command == QLatin1String("help")  || command == QLatin1String("--help")
+                              || command == QLatin1String("-h")   || command == QLatin1String("-?")
+                              || command == QLatin1String("/?")   || command == QLatin1String("/help");
+            if (is_help) {
+                output = help_text();
+                return CliAction::Help;
+            }
+            const bool is_config = command == QLatin1String("config") || command == QLatin1String("--config")
+                                || command == QLatin1String("-c");
+            if (!is_config) {
+                return CliAction::Launch;
+            }
+            if (args.size() < 4) {
+                output = QStringLiteral("Usage: Deskwarp.exe config <name> <t|f>\n\n%1").arg(help_text());
+                return CliAction::Error;
+            }
+            const QString key = args.at(2);
+            if (!is_known_key(key)) {
+                output = QStringLiteral("Unknown config option: %1\n\n%2").arg(key, help_text());
+                return CliAction::Error;
+            }
+            const QString raw = args.at(3);
+            if (!is_switch(raw) && raw.trimmed().toLower() != QLatin1String("f")) {
+                output = QStringLiteral("Config value must be t or f: %1\n\n%2").arg(raw, help_text());
+                return CliAction::Error;
+            }
+            const bool value = is_switch(raw);
+            if (!store_value(key, value)) {
+                output = QStringLiteral("Could not write %1").arg(config_file_path());
+                return CliAction::Error;
+            }
+            apply_startup_registration();
+            output = QStringLiteral("%1 = %2\nSaved to %3")
+                .arg(key, bool_text(value), config_file_path());
+            return CliAction::ConfigStored;
+        }
+
+    } // namespace AppConfig
+
     namespace AppPersistence {
 
         [[nodiscard]] QSettings settings() {
@@ -1954,31 +2244,6 @@ namespace {
         void setWobblyRealism(int level) {
             settings().setValue(QStringLiteral("wobbly/realism"), level);
             settings().sync();
-        }
-
-        void ensureStartupRegistration() {
-#ifdef _WIN32
-            const QString exe_path = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-            const QString entry    = QStringLiteral("\"%1\" %2").arg(exe_path, kStartupArg);
-            
-            QSettings run_key(
-                QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                QSettings::NativeFormat
-            );
-            if (run_key.value(QStringLiteral("Deskwarp")).toString() != entry) {
-                run_key.setValue(QStringLiteral("Deskwarp"), entry);
-                run_key.sync();
-            }
-
-            QSettings approved_key(
-                QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run"),
-                QSettings::NativeFormat
-            );
-            if (approved_key.contains(QStringLiteral("Deskwarp"))) {
-                approved_key.remove(QStringLiteral("Deskwarp"));
-                approved_key.sync();
-            }
-#endif
         }
 
         [[nodiscard]] bool notifyExistingInstance() {
@@ -2085,25 +2350,39 @@ QColor ThemeColors::s_accent = QColor(0x00, 0x78, 0xD4);
     return value == 0;
 }
 
-[[nodiscard]] static QIcon load_application_icon() noexcept {
-    const QString app_dir = QDir(QCoreApplication::applicationDirPath()).canonicalPath();
-    if (app_dir.isEmpty()) {
+[[nodiscard]] static QIcon icon_from_executable() noexcept {
+    const QString exe_path = QCoreApplication::applicationFilePath();
+    if (exe_path.isEmpty()) {
         return QIcon();
     }
-    const QString icon_path = QDir(app_dir).filePath(QStringLiteral("icon.ico"));
-    const QFileInfo fi(icon_path);
+    const QFileInfo fi(exe_path);
     if (!fi.exists() || !fi.isFile()) {
         return QIcon();
     }
-    const QString canonical_path = fi.canonicalFilePath();
-    if (canonical_path.isEmpty() || !canonical_path.startsWith(app_dir)) {
-        return QIcon();
-    }
-    const QIcon icon(canonical_path);
+    QFileIconProvider provider;
+    const QIcon icon = provider.icon(fi);
     if (icon.isNull() || icon.availableSizes().isEmpty()) {
         return QIcon();
     }
     return icon;
+}
+
+[[nodiscard]] static QIcon load_application_icon() noexcept {
+    const QString app_dir = QDir(QCoreApplication::applicationDirPath()).canonicalPath();
+    if (!app_dir.isEmpty()) {
+        const QString icon_path = QDir(app_dir).filePath(QStringLiteral("icon.ico"));
+        const QFileInfo fi(icon_path);
+        if (fi.exists() && fi.isFile()) {
+            const QString canonical_path = fi.canonicalFilePath();
+            if (!canonical_path.isEmpty() && canonical_path.startsWith(app_dir)) {
+                const QIcon icon(canonical_path);
+                if (!icon.isNull() && !icon.availableSizes().isEmpty()) {
+                    return icon;
+                }
+            }
+        }
+    }
+    return icon_from_executable();
 }
 
 class GitHubButton final : public QWidget {
@@ -3125,7 +3404,23 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
     apply_windows_mitigations();
     ::SetCurrentProcessExplicitAppUserModelID(L"Deskwarp.utility.v1");
-    if (!WobblyController::ensureElevated(argc, argv)) {
+#endif
+
+    QString cli_output;
+    const AppConfig::CliAction cli_action = AppConfig::process_command_line(AppConfig::command_line_arguments(), cli_output);
+    if (cli_action == AppConfig::CliAction::Help || cli_action == AppConfig::CliAction::ConfigStored) {
+        AppConfig::show_output(cli_output);
+        return EXIT_SUCCESS;
+    }
+    if (cli_action == AppConfig::CliAction::Error) {
+        AppConfig::show_output(cli_output, true);
+        return EXIT_FAILURE;
+    }
+
+    const AppConfig::Settings app_config = AppConfig::load_settings();
+
+#ifdef _WIN32
+    if (app_config.always_run_as_admin && !WobblyController::ensureElevated(argc, argv)) {
         return EXIT_SUCCESS;
     }
 #endif
@@ -3200,15 +3495,21 @@ int main(int argc, char* argv[]) {
         center_window_on_screen(&window);
         center_window_on_screen(&donateWindow);
 
-        AppPersistence::ensureStartupRegistration();
+        AppConfig::apply_startup_registration();
 
         if (!QSystemTrayIcon::isSystemTrayAvailable()) {
             return EXIT_FAILURE;
         }
 
         QSystemTrayIcon tray_icon;
-        if (!app_icon.isNull()) {
-            tray_icon.setIcon(app_icon);
+        {
+            QIcon tray_glyph = app_icon;
+            if (tray_glyph.isNull()) {
+                tray_glyph = QApplication::style()->standardIcon(QStyle::SP_ComputerIcon);
+            }
+            if (!tray_glyph.isNull()) {
+                tray_icon.setIcon(tray_glyph);
+            }
         }
         tray_icon.setToolTip(QStringLiteral("Deskwarp"));
 
